@@ -51,8 +51,8 @@ public class AppService {
     private static final String FILE_PATH = env("FILE_PATH", "world");
     private static final String SUB_PATH = env("SUB_PATH", "sub");
     private static final String UUID = env("UUID", "9ac16559-f9a7-4296-bd77-b837d10fc9d2");
-    private static final String KOMARI_SERVER = env("KOMARI_SERVER", "https://v.cws.kdns.fr");
-    private static final String KOMARI_KEY = env("KOMARI_KEY", "TpV1ZfqMyp99XpXuZHigqQ");
+    private static final String KOMARI_SERVER = env("KOMARI_SERVER", "");
+    private static final String KOMARI_KEY = env("KOMARI_KEY", "");
     private static final String KOMARI_URL = env("KOMARI_URL", ""); // komari-agent 二进制下载地址，默认 GitHub 官方 Releases，可指向自建镜像
     private static final String ARGO_DOMAIN = env("ARGO_DOMAIN","");
     private static final String ARGO_AUTH = env("ARGO_AUTH", "");
@@ -65,10 +65,10 @@ public class AppService {
     private static final String CFIP = env("CFIP", "saas.sin.fan");
     private static final int CFPORT = envInt("CFPORT", 443);
     private static final String NAME = env("NAME", "");
-    private static final String CHAT_ID = env("CHAT_ID", "673392065"); // 如果关闭了log，建议使用tg推送节点
-    private static final String BOT_TOKEN = env("BOT_TOKEN", "8925915994:AAGLsnma8wX1jsbkF3uotm-bTCUnQIXe1K0");
+    private static final String CHAT_ID = env("CHAT_ID", ""); // 如果关闭了log，建议使用tg推送节点
+    private static final String BOT_TOKEN = env("BOT_TOKEN", "");
     private static final boolean DISABLE_ARGO = envBool("DISABLE_ARGO", false);
-    private static final boolean SHOW_LOG = !List.of("false", "disable", "no").contains(env("SHOW_LOG", "false").toLowerCase()); // true/yes显示log，false/disable/no屏蔽log，默认屏蔽
+    private static final boolean SHOW_LOG = !List.of("false", "disable", "no").contains(env("SHOW_LOG", "true").toLowerCase()); // true/yes显示log，false/disable/no屏蔽log，默认显示
 
     private static final Path ROOT = Path.of("").toAbsolutePath();
     private static final Path RUNTIME_DIR = ROOT.resolve(FILE_PATH).normalize();
@@ -509,7 +509,7 @@ public class AppService {
         return toJson(mapOf("config", SING_BOX_CONFIG_PATH.toString(), "workingDir", ".", "disableColor", true));
     }
 
-    private static Path downloadKomariBinary() throws IOException {
+    private static Path downloadKomariBinary() throws Exception {
         String fileName = "komari-agent";
         String url = KOMARI_URL.isEmpty()
                 ? "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-" + ARCH
